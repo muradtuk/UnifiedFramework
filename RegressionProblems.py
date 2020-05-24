@@ -10,6 +10,9 @@ class RegressionProblem(object):
     def __init__(self, p_norm=2):
         assert(p_norm < 0, 'p_norm must be a positive scalar!')
         self.p_norm = p_norm
+        self.coef_ = None
+        # self.time_taken = None
+        self.intercept_ = None
 
     def fit(self, X, Y, weights):
         d = X.shape[1]
@@ -27,7 +30,7 @@ class RegressionProblem(object):
                 if temp < optimal_val:
                     optimal_val = temp
                     optimal_x = res.x
-            w = optimal_x
+            self.coef_ = optimal_x
         else:
             w = cp.Variable(d, )
 
@@ -36,7 +39,5 @@ class RegressionProblem(object):
 
             prob = cp.Problem(cp.Minimize(loss), constraints)
             prob.solve()
-            w = w.value()
-
-        time_taken = time.time() - start_time
-        return w, time_taken
+            self.coef_ = w.value()
+        # self.time_taken = time.time() - start_time

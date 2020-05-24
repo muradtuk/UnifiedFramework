@@ -7,24 +7,29 @@ import Coreset
 import copy
 
 
-
 class MainProgram(object):
     def __init__(self, file_path, problem_type, Z, LAMBDA=1, streaming=False):
         self.file_path = file_path
         self.pool = Pool(Utils.THREAD_NUM)
-        self.coresets = [Coreset.Coreset() for i in range(Utils.REPS)]
+        var_dict = Utils.initializaVariables(problem_type, Z, LAMBDA)
         self.samplingProcedures = \
             (lambda i, sensitivity, sample_size, random_state=0, is_uniform=False:
              self.coresets[i].sampleCoreset(sensitivity, sample_size, random_state)) \
-            if not streaming else 1
+                if not streaming else 1
 
-        Utils.initializaVariables(problem_type, Z, LAMBDA)
+        self.coresets = [Coreset.Coreset(var_dict['SENSE_BOUND']) for i in range(Utils.REPS)]
         self.P = Utils.readRealData(file_path)
         self.sample_sizes = Utils.generateSampleSizes(Utils.NUM_SAMPLES)
-        self.sensitivity = None
+        self.optimizor = Optimizor.Optimizor()
+        self.optimizor.defineSumOfWegiths(self.P.W)
+        if not streaming:
+            self.sensitivity = self.coresets[0].computeSensitivity(self.P, Utils.USE_SVD)
 
-    def computeRelativeErrorPerCoreset(self, P, time_taken):
-        pass
+        self.opt_val = self.optimizor.fit(self.P)
+
+    def computeRelativeErrorPerCoreset(self, coreset, time_taken):
+        value_on_coreset, fitting_time = self.optimizor.fit(coreset)
+        return value_on_coreset / self.opt_val - 1, fitting_time + time_taken
 
     @classmethod
     def updateProblem(cls, file_path, problem_type, Z, LAMBDA=1, streaming=False):
@@ -78,3 +83,17 @@ class MainProgram(object):
         np.savez('results.npz', mean_of_error=mean_of_error, mean_of_time=mean_of_time, std_of_error=std_of_error,
                  std_of_time=std_of_time, mean_of_coreset_size=mean_of_coreset_size)
 
+    @staticmethod
+    def main():
+        dataset = 'HTRU_2.csv'
+        problem_type = 'svm'
+        Z = 2
+        Lambda = 1
+        streaming = False
+        main_runner = MainProgram(dataset, problem_type, Z, Lambda, streaming)
+        main_runner.applyComaprison()
+
+
+
+if __name__ == '__main__':
+    MainProgram.main()

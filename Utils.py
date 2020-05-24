@@ -24,25 +24,26 @@ import time
 import pathlib
 import pandas as pd
 import sklearn
-from PointSet import PointSet
 import matplotlib.pyplot as plt
 from scipy.optimize import approx_fprime
 from scipy.stats import ortho_group
 import cvxpy as cp
 import copy
-
+from sklearn.preprocessing import Normalizer
+import json
 
 
 ################################################## General constants ###################################################
 EPSILON = 1e-9  # used for approximated the gradient of a loss function
 TOL = 0.01  # defines the approximation with respect to the minimum volume enclosing ellipsoid
-ELLIPSOID_MAX_ITER = 1000
+ELLIPSOID_MAX_ITER = 10
 OPTIMIZATION_TOL = 1e-6
 OPTIMIZATION_NUM_INIT = 10
 Z = 2  # the norm
 LAMBDA = 1  # the regularization parameter
 PARALLELIZE = True  # whether to apply the experimental results in a parallel fashion
 THREAD_NUM = 4
+DATA_FOLDER = 'datasets'
 
 # M estimator loss functions supported by our framework
 SENSE_BOUNDS = {
@@ -98,23 +99,58 @@ NUM_SAMPLES = 10  # number of coreset sizes
 x0 = None  # initial solution for hueristical solver
 OBJECTIVE_COST = None
 PROBLEM_TYPE = None
+SENSE_BOUND = None
+USE_SVD = False
+PREPROCESS_DATA = False
 
 
 def initializaVariables(problem_type, z=2, Lambda=1):
-    global Z, LAMBDA, OBJECTIVE_COST, PROBLEM_TYPE
+    global Z, LAMBDA, OBJECTIVE_COST, PROBLEM_TYPE, SENSE_BOUND, USE_SVD, PREPROCESS_DATA
     Z = z
     LAMBDA = Lambda
     OBJECTIVE_COST = OBJECTIVE_COSTS[problem_type]  # the objective function which we want to generate a coreset for
     PROBLEM_TYPE = problem_type
+    SENSE_BOUND = SENSE_BOUNDS[problem_type]
+    if ('lz' in problem_type and z != 2 ) or problem_type == 'lse':
+        USE_SVD = False
+        PREPROCESS_DATA = False
+    else:
+        USE_SVD = True
+        PREPROCESS_DATA = True
 
-def getObjectiveFunction():
-    global PROBLEM_DEF, OBJECTIVE_FUNC, GRAD_FUNC
+    var_dict = {}
 
-    if PROBLEM_DEF == 1:
-        OBJECTIVE_FUNC = (lambda P, w: np.sum(np.multiply(P.W,np.log(1.0 + np.square(np.dot(P.P[:, :-1], w) + P.P[:, -1])))))
-        GRAD_FUNC = (lambda P, w: np.sum(
-            np.multiply(P.W, np.multiply(np.expand_dims(2/(1.0 + np.square(np.dot(P.P[:, :-1], w) - P.P[:, -1])), 1),
-                                       np.multiply(P.P[:, :-1], np.expand_dims(np.dot(P.P[:, :-1], w) + P.P[:, -1], 1)), 0))))
+    variables = copy.copy(list(globals().keys()))
+
+    for var_name in variables:
+        if var_name.isupper():
+            var_dict[var_name] = eval(var_name)
+
+    return var_dict
+
+
+
+def preprocessData(P):
+    global PREPROCESS_DATA
+
+    if PREPROCESS_DATA:
+        P = Normalizer.fit(P[:, :-1], P[:, -1])
+
+    return P
+
+
+
+
+
+
+# def getObjectiveFunction():
+#     global PROBLEM_DEF, OBJECTIVE_FUNC, GRAD_FUNC
+#
+#     if PROBLEM_DEF == 1:
+#         OBJECTIVE_FUNC = (lambda P, w: np.sum(np.multiply(P.W,np.log(1.0 + np.square(np.dot(P.P[:, :-1], w) + P.P[:, -1])))))
+#         GRAD_FUNC = (lambda P, w: np.sum(
+#             np.multiply(P.W, np.multiply(np.expand_dims(2/(1.0 + np.square(np.dot(P.P[:, :-1], w) - P.P[:, -1])), 1),
+#                                        np.multiply(P.P[:, :-1], np.expand_dims(np.dot(P.P[:, :-1], w) + P.P[:, -1], 1)), 0))))
 
 
 def generateSampleSizes(n):
@@ -132,12 +168,12 @@ def generateSampleSizes(n):
     return samples
 
 
-def readSyntheticRegressionData():
-    data = np.load('SyntheticRegDataDan.npz')
-    X = data['X']
-    y = data['y']
-    P = PointSet(np.hstack((X[:, np.newaxis], -y[:, np.newaxis])))
-    return P
+# def readSyntheticRegressionData():
+#     data = np.load('SyntheticRegDataDan.npz')
+#     X = data['X']
+#     y = data['y']
+#     P = PointSet(np.hstack((X[:, np.newaxis], -y[:, np.newaxis])))
+#     return P
 
 
 def plotPointsBasedOnSens():
@@ -145,7 +181,7 @@ def plotPointsBasedOnSens():
     data = np.load('SyntheticRegDataDan.npz')
     X = data['X']
     y = data['y']
-    getObjectiveFunction()
+    # getObjectiveFunction()
     P = np.hstack((X[:, np.newaxis], -y[:, np.newaxis]))
 
     colorbars = ['bwr']#, 'seismic', 'coolwarm', 'jet', 'rainbow', 'gist_rainbow', 'hot', 'autumn']
@@ -229,7 +265,7 @@ def plotEllipsoid(center, radii, rotation, ax=None, plotAxes=True, cageColor='r'
 
 ##################################################### READ DATASETS ####################################################
 
-def readRealData(datafile=r'datasets\hour.csv', problemType=0):
+def readRealData(datafile='hour.csv', problemType=0):
     """
     This function, given a physical path towards an csv file, reads the data into a weighted set.
 
@@ -238,15 +274,18 @@ def readRealData(datafile=r'datasets\hour.csv', problemType=0):
     :param problemType: A integer defining whether the dataset is used for regression or clustering.
     :return: A weighted set, namely, a PointSet object containing the dataset.
     """
+    global PROBLEM_TYPE
+    data_path = r'datasets/' + datafile
     dataset = pd.read_csv(datafile)  # read csv file
     Q = dataset.values  # get the data which the csv file has
     P = Q[:, 2:].astype(np.float)  # remove first two columns
     P = np.around(P, 6)  # round the dataset to avoid numerical instabilities
-    if problemType == 0:  # if the problem is an instance of regression problem
+    if 'lz' in PROBLEM_TYPE:  # if the problem is an instance of regression problem
         P[:, -1] = -P[:, -1]
+    else:
+        P = preprocessData(P)
 
     return PointSet(P)
-
 
 
 def checkIfFileExists(file_path):
@@ -272,6 +311,7 @@ def createRandomInitialVector(d):
     x0 = np.random.randn(d,d)  # random dxd matrix
     [x0, r] = np.linalg.qr(x0)  # attain an orthogonal matrix
 
+
 ############################################## Optimization methods ####################################################
 def solveConvexRegressionProblem(P):
     start_time = time.time()
@@ -288,9 +328,6 @@ def solveConvexRegressionProblem(P):
     return w.value, time_taken
 
 
-
-
-
 def solveNonConvexRegressionProblem(P):
     start_time = time.time()
     func = lambda x: np.multiply(P.W, np.abs(np.dot(P[:, :-1], x) - P.P[:, -1]) ** Z)
@@ -300,8 +337,6 @@ def solveNonConvexRegressionProblem(P):
     for i in range(OPTIMIZATION_NUM_INIT):
         x0 = createRandomInitialVector(P.d)
         res = sp.optimize.minimize(fun=func, x0=x0, jac=grad, method='L-BFGS-B')
-
-
 
 
 def solveRegressionProblem(P):

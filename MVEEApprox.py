@@ -8,13 +8,10 @@ from scipy.optimize import approx_fprime
 import cvxpy as cp
 import scipy as sp
 import matplotlib.pyplot as plt
-from scipy.spatial import ConvexHull
 from scipy.io import loadmat
 import time
 import numpy.linalg as la
 import copy
-from mpl_toolkits import mplot3d
-
 
 class MVEEApprox(object):
     Epsilon = 1e-6
