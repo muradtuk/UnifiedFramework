@@ -17,7 +17,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 *****************************************************************************************"""
-
+import os
 import scipy as sp
 import numpy as np
 import time
@@ -30,7 +30,7 @@ from scipy.stats import ortho_group
 import cvxpy as cp
 import copy
 from sklearn.preprocessing import Normalizer
-import json
+import PointSet
 
 
 ################################################## General constants ###################################################
@@ -47,16 +47,17 @@ DATA_FOLDER = 'datasets'
 
 # M estimator loss functions supported by our framework
 SENSE_BOUNDS = {
-    'logisitic': (lambda x, w, args=None: 32 / LAMBDA * (2 / args[0] + w * np.linalg.norm(x, 2) ** 2) * args[0]),
-    'nclz': (lambda x, w, args=None: w * np.linalg.norm(x, Z) ** Z),
-    'svm': (lambda x, w, args=None: max(9 * w / args[0], 2 * w / args[1]) + 13 * w / (4 * args[0]) +
-                              125 * (args[0] + args[1]) / (4 * LAMBDA) * (w * np.linalg.norm(x, 2)**2 +
+    'logisitic': (lambda x, w, args=None: 32 / LAMBDA * (2 / args[0] + w * np.linalg.norm(x, ord=2, axis=1) ** 2)
+                                          * args[0]),
+    'nclz': (lambda x, w, args=None: w * np.linalg.norm(x, ord=Z, axis=1) ** Z),
+    'svm': (lambda x, w, args=None: np.maximum(9 * w / args[0], 2 * w / args[1]) + 13 * w / (4 * args[0]) +
+                              125 * (args[0] + args[1]) / (4 * LAMBDA) * (w * np.linalg.norm(x, ord=2, axis=1)**2 +
                                                                           w/(args[0] + args[1]))),
-    'restricted_lz': (lambda x, w, args=None: w * min(np.linalg.norm(x, 2),
+    'restricted_lz': (lambda x, w, args=None: w * np.minimum(np.linalg.norm(x, ord=2, axis=1),
                                                     args[1] ** np.abs(0.5 - 1/Z) * np.linalg.norm(args[0]))),
-    'lz': (lambda x, w, args=None: w * np.linalg.norm(x, Z) ** Z if 1 <= Z <= 2
-            else args[0]**(Z/2) * w * np.linalg.norm(x, Z)**Z),
-    'lse': (lambda x, w, args=None: w * np.linalg.norm(x, 1))
+    'lz': (lambda x, w, args=None: w * np.linalg.norm(x, ord=Z, axis=1) ** Z if 1 <= Z <= 2
+            else args[0]**(Z/2) * w * np.linalg.norm(x, ord=Z, axis=1)**Z),
+    'lse': (lambda x, w, args=None: w * np.linalg.norm(x, ord=1, axis=1))
 }
 
 OBJECTIVE_COSTS = {
@@ -69,10 +70,10 @@ OBJECTIVE_COSTS = {
     'svm':
         (lambda P, x, args=None: (np.sum(P.W) / (2 * args[0]) if args is not None else (1 / 2)) *
                                  np.linalg.norm(x[:-1], 2) ** 2 +
-                                 LAMBDA * np.sum(np.multiply(P.W, np.max(0,
+                                 LAMBDA * np.sum(np.multiply(P.W, np.maximum(0,
                                                                          1 - (np.multiply(P.P[:, -1],
-                                                                                          np.dot(P.P[:, :-1], x[:-1]))
-                                                                              + x[-1]))))),
+                                                                                          np.dot(P.P[:, :-1], x[:-1])
+                                                                                          + x[-1])))))),
     'lz':
         (lambda P, x, args=None: np.sum(np.multiply(P.W, np.abs(np.dot(P.P[:, :-1], x) - P.P[:, -1]) ** Z))),
 'restricted_lz':
@@ -89,7 +90,7 @@ DATA_TYPE = REAL_DATA  # distinguishes between the use of real vs synthetic data
 
 ########################################### Experimental results constants #############################################
 # colors for our graphs
-color_matching = {'Our coreset': 'red',
+COLOR_MATCHING = {'Our coreset': 'red',
                   'Uniform sampling': 'blue',
                   'All data': 'black'}
 
@@ -111,7 +112,7 @@ def initializaVariables(problem_type, z=2, Lambda=1):
     OBJECTIVE_COST = OBJECTIVE_COSTS[problem_type]  # the objective function which we want to generate a coreset for
     PROBLEM_TYPE = problem_type
     SENSE_BOUND = SENSE_BOUNDS[problem_type]
-    if ('lz' in problem_type and z != 2 ) or problem_type == 'lse':
+    if ('lz' in problem_type and z != 2) or problem_type == 'lse':
         USE_SVD = False
         PREPROCESS_DATA = False
     else:
@@ -134,7 +135,14 @@ def preprocessData(P):
     global PREPROCESS_DATA
 
     if PREPROCESS_DATA:
-        P = Normalizer.fit(P[:, :-1], P[:, -1])
+        y = P[:, -1]
+        min_value = np.min(y)
+        max_value = np.max(y)
+        P = Normalizer().fit_transform(P[:, :-1], P[:, -1])
+
+        y[np.where(y == min_value)[0]] = -1
+        y[np.where(y == max_value)[0]] = 1
+        P = np.hstack((P, y[:, np.newaxis]))
 
     return P
 
@@ -163,7 +171,7 @@ def generateSampleSizes(n):
     global NUM_SAMPLES
 
     min_val = int(2 * np.log(n) ** 2)  # minimum sample size
-    max_val = int(n ** 0.6)  # maximal sample size
+    max_val = int(6 * n ** 0.6)  # maximal sample size
     samples = np.geomspace([min_val], [max_val], NUM_SAMPLES)  # a list of samples
     return samples
 
@@ -276,16 +284,17 @@ def readRealData(datafile='hour.csv', problemType=0):
     """
     global PROBLEM_TYPE
     data_path = r'datasets/' + datafile
-    dataset = pd.read_csv(datafile)  # read csv file
+    dataset = pd.read_csv(data_path)  # read csv file
     Q = dataset.values  # get the data which the csv file has
-    P = Q[:, 2:].astype(np.float)  # remove first two columns
-    P = np.around(P, 6)  # round the dataset to avoid numerical instabilities
+    P = Q.astype(np.float)  # remove first two columns
+    # P = np.around(P, 6)  # round the dataset to avoid numerical instabilities
     if 'lz' in PROBLEM_TYPE:  # if the problem is an instance of regression problem
         P[:, -1] = -P[:, -1]
     else:
         P = preprocessData(P)
 
-    return PointSet(P)
+    return PointSet.PointSet(P=P, W=None, ellipsoid_max_iters=ELLIPSOID_MAX_ITER, problem_type=PROBLEM_TYPE,
+                             use_svd=USE_SVD)
 
 
 def checkIfFileExists(file_path):
@@ -297,6 +306,25 @@ def checkIfFileExists(file_path):
     """
     file = pathlib.Path(file_path)
     return file.exists()
+
+def createDirectory(directory_name):
+    """
+    ##################### createDirectory ####################
+    Input:
+        - path: A string containing a path of an directory to be created at.
+
+    Output:
+        - None
+
+    Description:
+        This process is responsible creating an empty directory at a given path.
+    """
+    full_path = r'results/'+directory_name
+    try:
+        os.makedirs(full_path)
+    except OSError:
+        if not os.path.isdir(full_path):
+            raise
 
 
 def createRandomInitialVector(d):
